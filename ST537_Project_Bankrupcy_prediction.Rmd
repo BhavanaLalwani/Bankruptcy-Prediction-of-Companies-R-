@@ -1,0 +1,189 @@
+---
+title: "537 project"
+author: "Vikram"
+date: "4/21/2019"
+output: html_document
+---
+###Loading Data
+```{r}
+library("foreign")
+
+year1<-read.arff("1year.arff")
+year1<-as.data.frame(year1)
+head(year1)
+```
+
+#Evaluating ncp: number of PCs for optimal imputation
+```{r}
+#for(i in 1:ncol(year1)){
+#  year1[is.na(year1[,i]), i] <- mean(year1[,i], na.rm = TRUE)
+#}
+
+#year1<-na.omit(year1)
+
+p<-ncol(year1)-1
+library(missMDA)
+
+#A1<-scale(year1[,1:p], center=T,scale = T)
+year1.X<-year1[,1:p]
+nb<-estim_ncpPCA(year1.X,ncp.min = 0, ncp.max = 30,scale = T, method.cv = "gcv", verbose = T)
+nb
+plot(nb$criterion, pch=19, xlab= "Number of Principle components retained for PCA", ylab="MSEP", xaxt="n")
+axis(1, at=c(0:30), las=2)
+
+```
+
+
+#Imputing NA's using optinal NCP
+```{r}
+ncp<-2
+year1.X_complete<-imputePCA(year1.X, ncp = ncp, center=T,scale = T)
+year1.X_com<-as.data.frame(year1.X_complete$completeObs)
+rm(year1.X_complete)
+colnames(year1.X_com)<-c(1:64)
+library(corrplot)
+corrplot( cor(year1.X_com), order = "hclust" )
+```
+
+#PCA
+```{r}
+
+pca.out<-prcomp(year1.X_com,retx = T,center = T, scale. = T)
+summary(pca.out)
+varpca<-(pca.out$sdev)^2
+plot(varpca, type="b", pch = 19, main = "Variance explained by each PC",
+     xlab = "PC number", ylab = "Variance explained")
+plot(log(varpca), type="b", pch = 19, main = "log(variance) explained by each PC",
+     xlab = "PC number", ylab = "log(variance) explained")
+
+plot(100*cumsum(varpca)/sum(varpca),type="l",lwd=2, xlab=" Number of Principle Components", ylab = "% of Variance explained")
+abline(h=96, lty=2)
+abline(v=21, lty=2)
+```
+
+#PC Scores
+```{r}
+nPCs<-21
+year1.PCs<-as.data.frame(pca.out$x[,1:nPCs])
+
+set.seed(143)
+library(caret)
+
+
+year1.PCs_scaled<-as.data.frame(scale(year1.PCs, center = T, scale = T))
+year1.PCs_scaled$class<-year1$class
+
+year1.PCs_trainindex<-createDataPartition(year1.PCs_scaled$class,times = 1,p=0.8,list = F)
+year1.PCs_train<-year1.PCs_scaled[year1.PCs_trainindex,]
+year1.PCs_test<-year1.PCs_scaled[-year1.PCs_trainindex,]
+```
+
+## Regression Tree
+```{r}
+library(rpart)
+
+rtree.out<-rpart(factor(class) ~ ., data = year1)
+rtree_pred.out<-predict(rtree.out,data=year1, type="class")
+
+# Confusion matrix
+confusionMatrix(rtree_pred.out, year1$class)
+
+
+library(rattle)
+fancyRpartPlot(rtree.out,cex=0.7)
+
+library(maptree)
+draw.tree(rtree.out,cex=1)
+```
+
+
+
+
+## SVM
+```{r}
+#install.packages("klaR")
+#install.packages("kernlab")
+library(klaR)
+library(kernlab)
+library(e1071)
+
+year1.com<-year1.X_com
+year1.com$class<-year1$class
+sv <- ksvm(class ~ ., data = year1.com,
+           kernel = "rbfdot", type = "C-svc")
+
+# Confusion matrix
+svm.pred <- predict(sv, year1.com[,-ncol(year1.com)]) # predicted classes
+confusionMatrix(svm.pred,year1.com$class )
+
+year1.PCs$class<-year1$class
+
+sv.PCs <- ksvm(class ~ ., data = year1.PCs,
+           kernel = "rbfdot", type = "C-svc")
+
+# Confusion matrix
+svm.PCs_pred <- predict(sv.PCs, year1.PCs[,-ncol(year1.PCs)]) # predicted classes
+confusionMatrix(svm.PCs_pred,year1.com$class )
+
+```
+
+
+## Logistic Regression
+```{r}
+
+logit.out <- glm(class~ (.)^2,family = binomial(link = "logit"),data = year1.PCs)
+
+
+plot(logit.out$fitted.values, ylab="Predicted probability", xlab="Observation number", main="Model with 2 way Interactions")
+# Predicted groups
+logit_train.class = ifelse(logit.out$fitted.values>0.5, 1, 0)
+
+
+# Confusion matrix
+confusionMatrix( as.factor(logit_train.class),year1.PCs$class)
+
+```
+
+
+## NeuralNet
+```{r}
+
+library(neuralnet)
+nnet.out<-neuralnet(class ~ ., data = year1.PCs_train,hidden = c(3),linear.output = F, stepmax = 1e06)
+
+
+
+plot(nnet.out)
+# Confusion matrix
+
+train.class<-apply(nnet.out$net.result[[1]],1, which.max)-1
+confusionMatrix(as.factor(train.class),as.factor(year1.PCs_train$class))
+
+#plot(nnet.out$net.result[[1]][,2])
+
+test_predicted<-predict(nnet.out,year1.PCs_test[,-(nPCs+1)])
+test.class<-apply(test_predicted,1, which.max)-1
+
+confusionMatrix(as.factor(test.class), as.factor(year1.PCs_test$class))
+#plot(test_predicted[,2])
+```
+
+## KNN
+```{r}
+library(class)
+trctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+knn_fit <- train(class ~., data = year1.PCs_train, method = "knn",
+ trControl=trctrl,
+ preProcess = c("center", "scale"),
+ tuneLength = 10)
+knn_fit
+
+plot(knn_fit, lwd=2, cex=1.5)
+
+
+knn.out <- knn(train=year1.PCs_train[,-nPCs],test=year1.PCs_test[,-nPCs],cl=year1.PCs_train$class,k=15)
+
+# Confusion matrix
+confusionMatrix(knn.out, year1.PCs_test$class)
+
+```
